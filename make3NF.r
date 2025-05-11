@@ -37,15 +37,13 @@ create_3nf_transformation <- function(db_path = "water_samples.db", output_sql_p
   
   # Create INSERT statements for each parameter
   for (param in parameter_columns) {
-    # Handle column names with spaces or special characters
-    quoted_param <- paste0('"', param, '"')
-    
+    # Use column name directly without quotes
     insert_stmt <- paste0(
       "-- Insert ", param, " values\n",
       "INSERT INTO normalized_chemistry (waterbodyID, sampleID, inlet_outlet, parameter, value)\n",
-      "SELECT WaterbodyID, SampleID, InletOrOutlet, '", param, "', ", quoted_param, "\n",
+      "SELECT WaterbodyID, SampleID, InletOrOutlet, '", param, "', ", param, "\n",
       "FROM water_samples\n",
-      "WHERE ", quoted_param, " IS NOT NULL;"
+      "WHERE ", param, " IS NOT NULL;"
     )
     
     sql_script <- c(sql_script, insert_stmt, "")
@@ -67,26 +65,48 @@ create_3nf_transformation <- function(db_path = "water_samples.db", output_sql_p
   
   # Execute the SQL script
   sql_text <- paste(sql_script, collapse = "\n")
-  cat("Executing SQL to transform data to 3NF...\n")
-  dbExecute(con, sql_text)
   
-  # Verify the transformation
-  count <- dbGetQuery(con, "SELECT COUNT(*) FROM normalized_chemistry")
-  cat("Number of rows in normalized table:", count[[1]], "\n")
-  
-  # Sample of normalized data
-  sample <- dbGetQuery(con, "SELECT * FROM normalized_chemistry LIMIT 10")
-  cat("Sample of normalized data:\n")
-  print(sample)
-  
-  # Count by parameter
-  param_counts <- dbGetQuery(con, "SELECT parameter, COUNT(*) as count FROM normalized_chemistry GROUP BY parameter ORDER BY count DESC")
-  cat("Data points per parameter:\n")
-  print(param_counts)
+  # Execute the SQL script with error handling
+  tryCatch({
+    cat("Executing SQL to transform data to 3NF...\n")
+    dbExecute(con, sql_text)
+    
+    # Verify the transformation
+    count <- dbGetQuery(con, "SELECT COUNT(*) FROM normalized_chemistry")
+    cat("Number of rows in normalized table:", count[[1]], "\n")
+    
+    # Sample of normalized data
+    sample <- dbGetQuery(con, "SELECT * FROM normalized_chemistry LIMIT 10")
+    cat("Sample of normalized data:\n")
+    print(sample)
+    
+    # Count by parameter
+    param_counts <- dbGetQuery(con, "SELECT parameter, COUNT(*) as count FROM normalized_chemistry GROUP BY parameter ORDER BY count DESC")
+    cat("Data points per parameter:\n")
+    print(param_counts)
+  }, error = function(e) {
+    cat("Error during SQL execution:", conditionMessage(e), "\n")
+    
+    # Output the problematic columns for debugging
+    cat("Columns that might have caused issues:\n")
+    print(columns)
+    
+    # Try to execute each statement individually to identify problematic ones
+    for(stmt in sql_script) {
+      if(grepl("^INSERT", stmt)) {
+        cat("Testing statement:", substr(stmt, 1, 80), "...\n")
+        tryCatch({
+          dbExecute(con, stmt)
+        }, error = function(e) {
+          cat("Error in statement:", conditionMessage(e), "\n")
+        })
+      }
+    }
+  })
   
   # Disconnect from the database
   dbDisconnect(con)
-  cat("3NF transformation complete!\n")
+  cat("3NF transformation process completed!\n")
   
   return(invisible(NULL))
 }
@@ -102,9 +122,24 @@ execute_sql_from_file <- function(db_path = "water_samples.db", sql_path = "3nf.
   # Read the SQL script from the file
   sql_script <- readChar(sql_path, file.info(sql_path)$size)
   
-  # Execute the SQL script
+  # Execute the SQL script line by line
   cat("Executing SQL script from", sql_path, "...\n")
-  dbExecute(con, sql_script)
+  
+  # Split the script by semicolons to get individual statements
+  statements <- strsplit(sql_script, ";")[[1]]
+  
+  # Execute each statement with error handling
+  for(stmt in statements) {
+    stmt <- trimws(stmt)
+    if(nchar(stmt) > 0) {
+      tryCatch({
+        dbExecute(con, paste0(stmt, ";"))
+      }, error = function(e) {
+        cat("Error executing statement:", substr(stmt, 1, 100), "...\n")
+        cat("Error message:", conditionMessage(e), "\n")
+      })
+    }
+  }
   
   # Verify the transformation
   count <- dbGetQuery(con, "SELECT COUNT(*) FROM normalized_chemistry")

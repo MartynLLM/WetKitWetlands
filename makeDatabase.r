@@ -114,7 +114,7 @@ query_example <- function(db_path = "water_samples.db") {
 create_water_database()
 
 # Uncomment to use the automatic table creation approach instead
-# create_water_database_auto()
+create_water_database_auto()
 
 # Uncomment to run a sample query
 # query_example()

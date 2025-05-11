@@ -153,7 +153,7 @@ execute_sql_from_file <- function(db_path = "water_samples.db", sql_path = "3nf.
 }
 
 # Generate the 3NF SQL file
-create_3nf_transformation()
+#create_3nf_transformation()
 
 # Alternatively, just execute an existing SQL file
-# execute_sql_from_file()
+execute_sql_from_file()

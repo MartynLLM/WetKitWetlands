@@ -24,6 +24,8 @@ water_chemistry_app <- function(db_path = "water_samples.db") {
       mainPanel(
         plotOutput("scatterPlot"),
         br(),
+        textOutput("dataPointsInfo"),
+        br(),
         tableOutput("correlationTable")
       )
     )
@@ -52,14 +54,7 @@ water_chemistry_app <- function(db_path = "water_samples.db") {
       req(input$xParam)
       req(input$yParam)
       
-      # Build waterbody filter
-      waterbody_filter <- ""
-      if (!identical(input$waterbodyID, "All") && length(input$waterbodyID) > 0 && !("All" %in% input$waterbodyID)) {
-        waterbody_ids <- paste(input$waterbodyID, collapse = ",")
-        waterbody_filter <- paste0(" AND x_data.waterbodyID IN (", waterbody_ids, ")")
-      }
-      
-      # SQL query to join the data for both parameters
+      # Build the query
       query <- paste0("
         SELECT 
           x_data.sampleID,
@@ -75,11 +70,19 @@ water_chemistry_app <- function(db_path = "water_samples.db") {
           x_data.sampleID = y_data.sampleID
         WHERE 
           x_data.parameter = '", input$xParam, "'
-          AND y_data.parameter = '", input$yParam, "'", 
-          waterbody_filter, "
-        ORDER BY
-          x_data.sampleID
-      ")
+          AND y_data.parameter = '", input$yParam, "'"
+      )
+      
+      # Add waterbody filter if specific waterbodies are selected
+      if (length(input$waterbodyID) > 0 && !("All" %in% input$waterbodyID)) {
+        waterbody_ids <- paste(input$waterbodyID, collapse = ",")
+        query <- paste0(query, " AND x_data.waterbodyID IN (", waterbody_ids, ")")
+      }
+      
+      query <- paste0(query, " ORDER BY x_data.sampleID")
+      
+      # Print query for debugging
+      print(query)
       
       # Execute query
       data <- dbGetQuery(con, query)
@@ -96,7 +99,11 @@ water_chemistry_app <- function(db_path = "water_samples.db") {
       if (nrow(data) == 0) {
         return(ggplot() + 
                annotate("text", x = 0.5, y = 0.5, label = "No data available for the selected combination") + 
-               theme_minimal())
+               theme_minimal() +
+               theme(
+                 panel.background = element_rect(fill = "white"),
+                 plot.background = element_rect(fill = "white")
+               ))
       }
       
       # Create the scatter plot
@@ -116,11 +123,18 @@ water_chemistry_app <- function(db_path = "water_samples.db") {
         )
       
       # Add regression line if requested
-      if (input$showRegression) {
+      if (input$showRegression && nrow(data) >= 3) {
         p <- p + geom_smooth(method = "lm", se = TRUE, color = "black", linetype = "dashed")
       }
       
       return(p)
+    })
+    
+    # Display number of data points
+    output$dataPointsInfo <- renderText({
+      data <- get_parameter_data()
+      paste("Number of data points:", nrow(data), 
+            "| Number of waterbodies:", length(unique(data$waterbodyID)))
     })
     
     # Generate correlation table

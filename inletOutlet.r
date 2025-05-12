@@ -4,6 +4,7 @@ library(RSQLite)
 library(DBI)
 library(ggplot2)
 library(dplyr)
+library(DT)
 
 # Define the Shiny app for inlet-outlet comparison
 inlet_outlet_app <- function(db_path = "water_samples.db") {
@@ -20,6 +21,7 @@ inlet_outlet_app <- function(db_path = "water_samples.db") {
         checkboxInput("showRegression", "Show regression line", value = TRUE),
         hr(),
         checkboxInput("logScale", "Use log scale (for both axes)", value = FALSE),
+        checkboxInput("showLabels", "Show sample dates as labels", value = FALSE),
         hr(),
         downloadButton("downloadData", "Download Paired Data")
       ),
@@ -80,7 +82,7 @@ inlet_outlet_app <- function(db_path = "water_samples.db") {
     updateSelectInput(session, "parameter", choices = parameters)
     updateSelectInput(session, "waterbodyID", choices = c("All", waterbodies), selected = "All")
     
-    # Function to get paired inlet-outlet data
+    # Function to get paired inlet-outlet data by waterbodyID and date
     get_paired_data <- reactive({
       # Validate inputs
       req(input$parameter)
@@ -89,31 +91,36 @@ inlet_outlet_app <- function(db_path = "water_samples.db") {
       waterbody_filter <- ""
       if (length(input$waterbodyID) > 0 && !("All" %in% input$waterbodyID)) {
         waterbody_ids <- paste(input$waterbodyID, collapse = ",")
-        waterbody_filter <- paste0(" AND inlet.waterbodyID IN (", waterbody_ids, ")")
+        waterbody_filter <- paste0(" AND ws_inlet.WaterbodyID IN (", waterbody_ids, ")")
       }
       
-      # SQL query to get paired inlet-outlet data
+      # SQL query to get paired inlet-outlet data by waterbodyID and date
       query <- paste0("
         SELECT 
-          inlet.waterbodyID,
-          inlet.sampleID,
+          ws_inlet.WaterbodyID,
+          ws_inlet.SamplingDate,
+          inlet.sampleID as inlet_sampleID,
+          outlet.sampleID as outlet_sampleID,
           inlet.value as inlet_value,
           outlet.value as outlet_value
         FROM 
           normalized_chemistry inlet
+        JOIN
+          water_samples ws_inlet ON inlet.sampleID = ws_inlet.SampleID
         JOIN 
           normalized_chemistry outlet
-        ON 
-          inlet.sampleID = outlet.sampleID
-          AND inlet.parameter = outlet.parameter
-          AND inlet.waterbodyID = outlet.waterbodyID
+        JOIN
+          water_samples ws_outlet ON outlet.sampleID = ws_outlet.SampleID
         WHERE 
-          inlet.parameter = '", input$parameter, "'
-          AND inlet.inlet_outlet = 'Inlet'
-          AND outlet.inlet_outlet = 'Outlet'", 
+          inlet.parameter = '", input$parameter, "' AND
+          outlet.parameter = '", input$parameter, "' AND
+          inlet.inlet_outlet = 'Inlet' AND
+          outlet.inlet_outlet = 'Outlet' AND
+          ws_inlet.WaterbodyID = ws_outlet.WaterbodyID AND
+          ws_inlet.SamplingDate = ws_outlet.SamplingDate", 
           waterbody_filter, "
         ORDER BY
-          inlet.waterbodyID, inlet.sampleID
+          ws_inlet.WaterbodyID, ws_inlet.SamplingDate
       ")
       
       # Execute query
@@ -127,6 +134,12 @@ inlet_outlet_app <- function(db_path = "water_samples.db") {
           (data$outlet_value - data$inlet_value) / data$inlet_value * 100,
           NA
         )
+        
+        # Format the sampling date for display (assuming it's stored as YYYY-MM-DD or similar)
+        if (is.character(data$SamplingDate)) {
+          # Try to convert to Date if it's a character
+          data$SamplingDate <- as.Date(data$SamplingDate)
+        }
       }
       
       return(data)
@@ -146,10 +159,11 @@ inlet_outlet_app <- function(db_path = "water_samples.db") {
       }
       
       # Create the base plot
-      p <- ggplot(data, aes(x = inlet_value, y = outlet_value, color = factor(waterbodyID))) +
+      p <- ggplot(data, aes(x = inlet_value, y = outlet_value, color = factor(WaterbodyID))) +
         geom_point(size = 3, alpha = 0.7) +
         labs(
           title = paste("Inlet vs. Outlet:", input$parameter),
+          subtitle = paste("Matched by Waterbody ID and Sampling Date"),
           x = paste("Inlet", input$parameter),
           y = paste("Outlet", input$parameter),
           color = "Waterbody ID"
@@ -176,6 +190,16 @@ inlet_outlet_app <- function(db_path = "water_samples.db") {
         p <- p + geom_smooth(method = "lm", se = TRUE, color = "black", linetype = "solid")
       }
       
+      # Add date labels if requested
+      if (input$showLabels) {
+        # Format the date for display
+        data$label <- format(data$SamplingDate, "%Y-%m-%d")
+        
+        p <- p + 
+          geom_text(data = data, aes(label = label), 
+                    hjust = -0.2, vjust = -0.5, size = 3, check_overlap = TRUE)
+      }
+      
       return(p)
     })
     
@@ -189,7 +213,9 @@ inlet_outlet_app <- function(db_path = "water_samples.db") {
       
       # Calculate summary statistics
       cat("Number of paired samples:", nrow(data), "\n")
-      cat("Number of waterbodies:", length(unique(data$waterbodyID)), "\n\n")
+      cat("Number of waterbodies:", length(unique(data$WaterbodyID)), "\n")
+      cat("Date range:", format(min(data$SamplingDate), "%Y-%m-%d"), "to", 
+          format(max(data$SamplingDate), "%Y-%m-%d"), "\n\n")
       
       # Basic statistics on inlet values
       cat("Inlet values summary:\n")
@@ -239,9 +265,12 @@ inlet_outlet_app <- function(db_path = "water_samples.db") {
       
       # Format the data for display
       display_data <- data %>%
+        mutate(SamplingDate = format(SamplingDate, "%Y-%m-%d")) %>%
         select(
-          WaterbodyID = waterbodyID,
-          SampleID = sampleID,
+          WaterbodyID,
+          SamplingDate,
+          `Inlet SampleID` = inlet_sampleID,
+          `Outlet SampleID` = outlet_sampleID,
           Inlet = inlet_value,
           Outlet = outlet_value,
           Difference = difference,
@@ -251,8 +280,8 @@ inlet_outlet_app <- function(db_path = "water_samples.db") {
       DT::datatable(
         display_data,
         options = list(
-          pageLength = 5,
-          lengthMenu = c(5, 10, 20, 50),
+          pageLength = 10,
+          lengthMenu = c(5, 10, 20, 50, 100),
           scrollX = TRUE
         ),
         rownames = FALSE
@@ -267,7 +296,10 @@ inlet_outlet_app <- function(db_path = "water_samples.db") {
         paste0("inlet_outlet_", input$parameter, "_", Sys.Date(), ".csv")
       },
       content = function(file) {
-        write.csv(get_paired_data(), file, row.names = FALSE)
+        # Format date properly for the download
+        data <- get_paired_data()
+        data$SamplingDate <- format(data$SamplingDate, "%Y-%m-%d")
+        write.csv(data, file, row.names = FALSE)
       }
     )
     

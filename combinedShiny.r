@@ -4,35 +4,135 @@ library(RSQLite)
 library(DBI)
 library(ggplot2)
 library(dplyr)
+library(DT)
+library(shinydashboard)
+library(shinyjs)
 
-# Define the Shiny app for inlet-outlet comparison
-inlet_outlet_app <- function(db_path = "water_samples.db") {
+# Define the combined Shiny app
+water_chemistry_combined_app <- function(db_path = "water_samples.db") {
   
   # UI definition
   ui <- fluidPage(
-    titlePanel("Inlet vs. Outlet Water Chemistry Comparison"),
+    useShinyjs(),
+    tags$head(
+      tags$style(HTML("
+        .analysis-button {
+          height: 120px;
+          font-size: 16px;
+          margin: 10px;
+          border-radius: 10px;
+        }
+        .title-box {
+          background-color: #f8f9fa;
+          padding: 15px;
+          margin-bottom: 20px;
+          border-radius: 5px;
+          border-left: 4px solid #007bff;
+        }
+      "))
+    ),
     
-    sidebarLayout(
-      sidebarPanel(
-        selectInput("parameter", "Parameter:", choices = NULL),
-        selectInput("waterbodyID", "Select Waterbody:", choices = NULL, multiple = TRUE),
-        checkboxInput("showLine", "Show 1:1 reference line", value = TRUE),
-        checkboxInput("showRegression", "Show regression line", value = TRUE),
-        hr(),
-        checkboxInput("logScale", "Use log scale (for both axes)", value = FALSE),
-        hr(),
-        downloadButton("downloadData", "Download Paired Data")
-      ),
-      
-      mainPanel(
-        plotOutput("inletOutletPlot", height = "400px"),
-        hr(),
-        h4("Data Summary"),
-        verbatimTextOutput("summaryStats"),
-        hr(),
-        h4("Paired Data"),
-        DT::dataTableOutput("pairedDataTable")
-      )
+    # Title Panel
+    div(class = "title-box",
+        h1("Water Chemistry Analysis Tool", align = "center"),
+        h4("Select an analysis type to begin", align = "center")
+    ),
+    
+    # Initial selection screen
+    div(id = "selection-screen",
+        fluidRow(
+          column(width = 6, offset = 3,
+                 wellPanel(
+                   h3("Choose Analysis Type", align = "center"),
+                   br(),
+                   fluidRow(
+                     column(width = 6,
+                            actionButton("btn_parameter_comparison", 
+                                         "Compare Different Parameters",
+                                         class = "btn-primary analysis-button btn-block")
+                     ),
+                     column(width = 6,
+                            actionButton("btn_inlet_outlet", 
+                                         "Compare Inlet vs. Outlet",
+                                         class = "btn-success analysis-button btn-block")
+                     )
+                   ),
+                   br(),
+                   hr(),
+                   p("• Parameter Comparison: Analyze the relationship between any two water chemistry parameters", 
+                     style = "font-size: 14px;"),
+                   p("• Inlet vs. Outlet: Compare the same parameter between inlet and outlet measurements", 
+                     style = "font-size: 14px;")
+                 )
+          )
+        )
+    ),
+    
+    # Parameter comparison interface (initially hidden)
+    div(id = "parameter-comparison-ui", style = "display: none;",
+        fluidRow(
+          column(width = 12,
+                 h2("Parameter Comparison Analysis", 
+                    span(actionButton("back_to_main_from_param", "← Back", 
+                                     class = "btn-sm btn-default"), 
+                         style = "float: right; margin-right: 20px;"))
+          )
+        ),
+        sidebarLayout(
+          sidebarPanel(
+            selectInput("xParam", "X-axis Parameter:", choices = NULL),
+            selectInput("yParam", "Y-axis Parameter:", choices = NULL),
+            selectInput("waterbodyID_param", "Filter by Waterbody:", choices = NULL, multiple = TRUE),
+            checkboxInput("showRegression_param", "Show regression line", value = TRUE),
+            checkboxInput("logScale_param", "Use log scale (for both axes)", value = FALSE),
+            hr(),
+            downloadButton("downloadData_param", "Download Plot Data")
+          ),
+          
+          mainPanel(
+            plotOutput("scatterPlot_param", height = "400px"),
+            br(),
+            tableOutput("correlationTable_param"),
+            br(),
+            h4("Data Points"),
+            DT::dataTableOutput("dataTable_param")
+          )
+        )
+    ),
+    
+    # Inlet-Outlet comparison interface (initially hidden)
+    div(id = "inlet-outlet-ui", style = "display: none;",
+        fluidRow(
+          column(width = 12,
+                 h2("Inlet vs. Outlet Comparison", 
+                    span(actionButton("back_to_main_from_io", "← Back", 
+                                     class = "btn-sm btn-default"),
+                         style = "float: right; margin-right: 20px;"))
+          )
+        ),
+        sidebarLayout(
+          sidebarPanel(
+            selectInput("parameter_io", "Parameter:", choices = NULL),
+            selectInput("waterbodyID_io", "Select Waterbody:", choices = NULL, multiple = TRUE),
+            checkboxInput("showLine_io", "Show 1:1 reference line", value = TRUE),
+            checkboxInput("showRegression_io", "Show regression line", value = TRUE),
+            hr(),
+            checkboxInput("logScale_io", "Use log scale (for both axes)", value = FALSE),
+            checkboxInput("showLabels_io", "Show sample dates as labels", value = FALSE),
+            hr(),
+            downloadButton("downloadData_io", "Download Paired Data")
+          ),
+          
+          mainPanel(
+            plotOutput("inletOutletPlot", height = "400px"),
+            hr(),
+            h4("Data Summary"),
+            verbatimTextOutput("summaryStats_io"),
+            hr(),
+            h4("Paired Data"),
+            DT::dataTableOutput("pairedDataTable_io")
+          )
+        )
     )
   )
   
@@ -42,78 +142,288 @@ inlet_outlet_app <- function(db_path = "water_samples.db") {
     # Connect to database
     con <- dbConnect(SQLite(), db_path)
     
-    # Get list of available parameters that have both inlet and outlet values
-    parameters_query <- "
-      SELECT DISTINCT parameter 
-      FROM normalized_chemistry
-      WHERE parameter IN (
-        SELECT parameter
-        FROM normalized_chemistry
-        WHERE inlet_outlet = 'Inlet'
-        INTERSECT
-        SELECT parameter
-        FROM normalized_chemistry
-        WHERE inlet_outlet = 'Outlet'
-      )
-      ORDER BY parameter
-    "
-    parameters <- dbGetQuery(con, parameters_query)$parameter
+    # Button actions to switch between interfaces
+    observeEvent(input$btn_parameter_comparison, {
+      hide("selection-screen")
+      show("parameter-comparison-ui")
+    })
     
-    # Get list of waterbody IDs that have both inlet and outlet data
-    waterbodies_query <- "
-      SELECT DISTINCT waterbodyID 
-      FROM normalized_chemistry
-      WHERE waterbodyID IN (
-        SELECT waterbodyID
-        FROM normalized_chemistry
-        WHERE inlet_outlet = 'Inlet'
-        INTERSECT
-        SELECT waterbodyID
-        FROM normalized_chemistry
-        WHERE inlet_outlet = 'Outlet'
-      )
-      ORDER BY waterbodyID
-    "
-    waterbodies <- dbGetQuery(con, waterbodies_query)$waterbodyID
+    observeEvent(input$btn_inlet_outlet, {
+      hide("selection-screen")
+      show("inlet-outlet-ui")
+    })
     
-    # Update UI input choices
-    updateSelectInput(session, "parameter", choices = parameters)
-    updateSelectInput(session, "waterbodyID", choices = c("All", waterbodies), selected = "All")
+    observeEvent(input$back_to_main_from_param, {
+      hide("parameter-comparison-ui")
+      show("selection-screen")
+    })
     
-    # Function to get paired inlet-outlet data
-    get_paired_data <- reactive({
+    observeEvent(input$back_to_main_from_io, {
+      hide("inlet-outlet-ui")
+      show("selection-screen")
+    })
+    
+    # --- COMMON DATA OPERATIONS ---
+    
+    # Get list of all parameters
+    all_parameters <- reactive({
+      dbGetQuery(con, "SELECT DISTINCT parameter FROM normalized_chemistry ORDER BY parameter")$parameter
+    })
+    
+    # Get list of all waterbody IDs
+    all_waterbodies <- reactive({
+      dbGetQuery(con, "SELECT DISTINCT waterbodyID FROM normalized_chemistry ORDER BY waterbodyID")$waterbodyID
+    })
+    
+    # --- PARAMETER COMPARISON MODULE ---
+    
+    # Initialize parameter comparison inputs
+    observe({
+      # Only run this when the parameter comparison UI is visible
+      req(input$btn_parameter_comparison)
+      
+      params <- all_parameters()
+      waterbodies <- all_waterbodies()
+      
+      # Update inputs
+      updateSelectInput(session, "xParam", choices = params)
+      updateSelectInput(session, "yParam", choices = params, selected = if(length(params) > 1) params[2] else params[1])
+      updateSelectInput(session, "waterbodyID_param", choices = c("All", waterbodies), selected = "All")
+    })
+    
+    # Function to get data for selected parameters
+    get_parameter_data <- reactive({
       # Validate inputs
-      req(input$parameter)
+      req(input$xParam)
+      req(input$yParam)
       
       # Build waterbody filter
       waterbody_filter <- ""
-      if (length(input$waterbodyID) > 0 && !("All" %in% input$waterbodyID)) {
-        waterbody_ids <- paste(input$waterbodyID, collapse = ",")
-        waterbody_filter <- paste0(" AND inlet.waterbodyID IN (", waterbody_ids, ")")
+      if (length(input$waterbodyID_param) > 0 && !("All" %in% input$waterbodyID_param)) {
+        waterbody_ids <- paste(input$waterbodyID_param, collapse = ",")
+        waterbody_filter <- paste0(" AND x_data.waterbodyID IN (", waterbody_ids, ")")
       }
       
-      # SQL query to get paired inlet-outlet data
+      # SQL query to join the data for both parameters
       query <- paste0("
         SELECT 
-          inlet.waterbodyID,
-          inlet.sampleID,
+          x_data.sampleID,
+          x_data.waterbodyID,
+          x_data.inlet_outlet,
+          x_data.value as x_value,
+          y_data.value as y_value
+        FROM 
+          normalized_chemistry x_data
+        JOIN 
+          normalized_chemistry y_data 
+        ON 
+          x_data.sampleID = y_data.sampleID
+        WHERE 
+          x_data.parameter = '", input$xParam, "'
+          AND y_data.parameter = '", input$yParam, "'", 
+          waterbody_filter, "
+        ORDER BY
+          x_data.sampleID
+      ")
+      
+      # Execute query
+      data <- dbGetQuery(con, query)
+      
+      # Return the data
+      return(data)
+    })
+    
+    # Render the parameter comparison scatter plot
+    output$scatterPlot_param <- renderPlot({
+      data <- get_parameter_data()
+      
+      # Check if we have data
+      if (nrow(data) == 0) {
+        return(ggplot() + 
+               annotate("text", x = 0.5, y = 0.5, label = "No data available for the selected combination") + 
+               theme_minimal() +
+               theme(panel.background = element_rect(fill = "white")))
+      }
+      
+      # Create the scatter plot
+      p <- ggplot(data, aes(x = x_value, y = y_value, color = factor(waterbodyID))) +
+        geom_point(size = 3, alpha = 0.7) +
+        labs(
+          title = paste("Relationship between", input$xParam, "and", input$yParam),
+          x = input$xParam,
+          y = input$yParam,
+          color = "Waterbody ID"
+        ) +
+        theme_minimal() +
+        theme(
+          plot.title = element_text(size = 16, face = "bold"),
+          axis.title = element_text(size = 14),
+          legend.title = element_text(size = 12)
+        )
+      
+      # Apply log scale if requested
+      if (input$logScale_param && all(data$x_value > 0) && all(data$y_value > 0)) {
+        p <- p + scale_x_log10() + scale_y_log10()
+      }
+      
+      # Add regression line if requested
+      if (input$showRegression_param && nrow(data) >= 3) {
+        p <- p + geom_smooth(method = "lm", se = TRUE, color = "black", linetype = "dashed")
+      }
+      
+      return(p)
+    })
+    
+    # Generate correlation table for parameter comparison
+    output$correlationTable_param <- renderTable({
+      data <- get_parameter_data()
+      
+      if (nrow(data) < 3) {
+        return(data.frame(
+          Statistic = c("Number of Samples", "Correlation not available"),
+          Value = c(nrow(data), "Insufficient data")
+        ))
+      }
+      
+      # Calculate correlation
+      correlation <- cor.test(data$x_value, data$y_value)
+      
+      # Create the table
+      data.frame(
+        Statistic = c("Number of Samples", "Pearson Correlation", "p-value"),
+        Value = c(
+          nrow(data),
+          round(correlation$estimate, 4),
+          format.pval(correlation$p.value, digits = 3)
+        )
+      )
+    })
+    
+    # Display data table for parameter comparison
+    output$dataTable_param <- DT::renderDataTable({
+      data <- get_parameter_data()
+      
+      if (nrow(data) == 0) {
+        return(data.frame(Message = "No data available for the selected criteria."))
+      }
+      
+      # Format the data for display
+      display_data <- data %>%
+        select(
+          SampleID = sampleID,
+          WaterbodyID = waterbodyID,
+          `Inlet/Outlet` = inlet_outlet,
+          !!sym(input$xParam) := x_value,
+          !!sym(input$yParam) := y_value
+        )
+      
+      DT::datatable(
+        display_data,
+        options = list(
+          pageLength = 10,
+          lengthMenu = c(5, 10, 20, 50),
+          scrollX = TRUE
+        ),
+        rownames = FALSE
+      ) %>%
+      DT::formatRound(columns = c(input$xParam, input$yParam), digits = 4)
+    })
+    
+    # Download handler for parameter comparison data
+    output$downloadData_param <- downloadHandler(
+      filename = function() {
+        paste0(input$xParam, "_vs_", input$yParam, ".csv")
+      },
+      content = function(file) {
+        write.csv(get_parameter_data(), file, row.names = FALSE)
+      }
+    )
+    
+    # --- INLET-OUTLET COMPARISON MODULE ---
+    
+    # Initialize inlet-outlet comparison inputs
+    observe({
+      # Only run this when the inlet-outlet UI is visible
+      req(input$btn_inlet_outlet)
+      
+      # Get list of parameters that have both inlet and outlet values
+      inlet_outlet_parameters_query <- "
+        SELECT DISTINCT parameter 
+        FROM normalized_chemistry
+        WHERE parameter IN (
+          SELECT parameter
+          FROM normalized_chemistry
+          WHERE inlet_outlet = 'Inlet'
+          INTERSECT
+          SELECT parameter
+          FROM normalized_chemistry
+          WHERE inlet_outlet = 'Outlet'
+        )
+        ORDER BY parameter
+      "
+      inlet_outlet_parameters <- dbGetQuery(con, inlet_outlet_parameters_query)$parameter
+      
+      # Get list of waterbody IDs that have both inlet and outlet data
+      io_waterbodies_query <- "
+        SELECT DISTINCT waterbodyID 
+        FROM normalized_chemistry
+        WHERE waterbodyID IN (
+          SELECT waterbodyID
+          FROM normalized_chemistry
+          WHERE inlet_outlet = 'Inlet'
+          INTERSECT
+          SELECT waterbodyID
+          FROM normalized_chemistry
+          WHERE inlet_outlet = 'Outlet'
+        )
+        ORDER BY waterbodyID
+      "
+      io_waterbodies <- dbGetQuery(con, io_waterbodies_query)$waterbodyID
+      
+      # Update inputs
+      updateSelectInput(session, "parameter_io", choices = inlet_outlet_parameters)
+      updateSelectInput(session, "waterbodyID_io", choices = c("All", io_waterbodies), selected = "All")
+    })
+    
+    # Function to get paired inlet-outlet data by waterbodyID and date
+    get_paired_data <- reactive({
+      # Validate inputs
+      req(input$parameter_io)
+      
+      # Build waterbody filter
+      waterbody_filter <- ""
+      if (length(input$waterbodyID_io) > 0 && !("All" %in% input$waterbodyID_io)) {
+        waterbody_ids <- paste(input$waterbodyID_io, collapse = ",")
+        waterbody_filter <- paste0(" AND ws_inlet.WaterbodyID IN (", waterbody_ids, ")")
+      }
+      
+      # SQL query to get paired inlet-outlet data by waterbodyID and date
+      query <- paste0("
+        SELECT 
+          ws_inlet.WaterbodyID,
+          ws_inlet.SamplingDate,
+          inlet.sampleID as inlet_sampleID,
+          outlet.sampleID as outlet_sampleID,
           inlet.value as inlet_value,
           outlet.value as outlet_value
         FROM 
           normalized_chemistry inlet
+        JOIN
+          water_samples ws_inlet ON inlet.sampleID = ws_inlet.SampleID
         JOIN 
           normalized_chemistry outlet
-        ON 
-          inlet.sampleID = outlet.sampleID
-          AND inlet.parameter = outlet.parameter
-          AND inlet.waterbodyID = outlet.waterbodyID
+        JOIN
+          water_samples ws_outlet ON outlet.sampleID = ws_outlet.SampleID
         WHERE 
-          inlet.parameter = '", input$parameter, "'
-          AND inlet.inlet_outlet = 'Inlet'
-          AND outlet.inlet_outlet = 'Outlet'", 
+          inlet.parameter = '", input$parameter_io, "' AND
+          outlet.parameter = '", input$parameter_io, "' AND
+          inlet.inlet_outlet = 'Inlet' AND
+          outlet.inlet_outlet = 'Outlet' AND
+          ws_inlet.WaterbodyID = ws_outlet.WaterbodyID AND
+          ws_inlet.SamplingDate = ws_outlet.SamplingDate", 
           waterbody_filter, "
         ORDER BY
-          inlet.waterbodyID, inlet.sampleID
+          ws_inlet.WaterbodyID, ws_inlet.SamplingDate
       ")
       
       # Execute query
@@ -127,6 +437,12 @@ inlet_outlet_app <- function(db_path = "water_samples.db") {
           (data$outlet_value - data$inlet_value) / data$inlet_value * 100,
           NA
         )
+        
+        # Format the sampling date for display
+        if (is.character(data$SamplingDate)) {
+          # Try to convert to Date if it's a character
+          data$SamplingDate <- as.Date(data$SamplingDate)
+        }
       }
       
       return(data)
@@ -146,12 +462,13 @@ inlet_outlet_app <- function(db_path = "water_samples.db") {
       }
       
       # Create the base plot
-      p <- ggplot(data, aes(x = inlet_value, y = outlet_value, color = factor(waterbodyID))) +
+      p <- ggplot(data, aes(x = inlet_value, y = outlet_value, color = factor(WaterbodyID))) +
         geom_point(size = 3, alpha = 0.7) +
         labs(
-          title = paste("Inlet vs. Outlet:", input$parameter),
-          x = paste("Inlet", input$parameter),
-          y = paste("Outlet", input$parameter),
+          title = paste("Inlet vs. Outlet:", input$parameter_io),
+          subtitle = paste("Matched by Waterbody ID and Sampling Date"),
+          x = paste("Inlet", input$parameter_io),
+          y = paste("Outlet", input$parameter_io),
           color = "Waterbody ID"
         ) +
         theme_minimal() +
@@ -162,25 +479,35 @@ inlet_outlet_app <- function(db_path = "water_samples.db") {
         )
       
       # Apply log scale if requested
-      if (input$logScale && all(data$inlet_value > 0) && all(data$outlet_value > 0)) {
+      if (input$logScale_io && all(data$inlet_value > 0) && all(data$outlet_value > 0)) {
         p <- p + scale_x_log10() + scale_y_log10()
       }
       
       # Add 1:1 reference line if requested
-      if (input$showLine) {
+      if (input$showLine_io) {
         p <- p + geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "gray50")
       }
       
       # Add regression line if requested
-      if (input$showRegression && nrow(data) >= 3) {
+      if (input$showRegression_io && nrow(data) >= 3) {
         p <- p + geom_smooth(method = "lm", se = TRUE, color = "black", linetype = "solid")
+      }
+      
+      # Add date labels if requested
+      if (input$showLabels_io) {
+        # Format the date for display
+        data$label <- format(data$SamplingDate, "%Y-%m-%d")
+        
+        p <- p + 
+          geom_text(data = data, aes(label = label), 
+                    hjust = -0.2, vjust = -0.5, size = 3, check_overlap = TRUE)
       }
       
       return(p)
     })
     
-    # Generate summary statistics
-    output$summaryStats <- renderPrint({
+    # Generate summary statistics for inlet-outlet comparison
+    output$summaryStats_io <- renderPrint({
       data <- get_paired_data()
       
       if (nrow(data) == 0) {
@@ -189,7 +516,9 @@ inlet_outlet_app <- function(db_path = "water_samples.db") {
       
       # Calculate summary statistics
       cat("Number of paired samples:", nrow(data), "\n")
-      cat("Number of waterbodies:", length(unique(data$waterbodyID)), "\n\n")
+      cat("Number of waterbodies:", length(unique(data$WaterbodyID)), "\n")
+      cat("Date range:", format(min(data$SamplingDate), "%Y-%m-%d"), "to", 
+          format(max(data$SamplingDate), "%Y-%m-%d"), "\n\n")
       
       # Basic statistics on inlet values
       cat("Inlet values summary:\n")
@@ -229,8 +558,8 @@ inlet_outlet_app <- function(db_path = "water_samples.db") {
       }
     })
     
-    # Display paired data table
-    output$pairedDataTable <- DT::renderDataTable({
+    # Display paired data table for inlet-outlet comparison
+    output$pairedDataTable_io <- DT::renderDataTable({
       data <- get_paired_data()
       
       if (nrow(data) == 0) {
@@ -239,9 +568,12 @@ inlet_outlet_app <- function(db_path = "water_samples.db") {
       
       # Format the data for display
       display_data <- data %>%
+        mutate(SamplingDate = format(SamplingDate, "%Y-%m-%d")) %>%
         select(
-          WaterbodyID = waterbodyID,
-          SampleID = sampleID,
+          WaterbodyID,
+          SamplingDate,
+          `Inlet SampleID` = inlet_sampleID,
+          `Outlet SampleID` = outlet_sampleID,
           Inlet = inlet_value,
           Outlet = outlet_value,
           Difference = difference,
@@ -251,8 +583,8 @@ inlet_outlet_app <- function(db_path = "water_samples.db") {
       DT::datatable(
         display_data,
         options = list(
-          pageLength = 5,
-          lengthMenu = c(5, 10, 20, 50),
+          pageLength = 10,
+          lengthMenu = c(5, 10, 20, 50, 100),
           scrollX = TRUE
         ),
         rownames = FALSE
@@ -261,13 +593,16 @@ inlet_outlet_app <- function(db_path = "water_samples.db") {
       DT::formatRound(columns = c("% Change"), digits = 2)
     })
     
-    # Download handler for the paired data
-    output$downloadData <- downloadHandler(
+    # Download handler for inlet-outlet data
+    output$downloadData_io <- downloadHandler(
       filename = function() {
-        paste0("inlet_outlet_", input$parameter, "_", Sys.Date(), ".csv")
+        paste0("inlet_outlet_", input$parameter_io, "_", Sys.Date(), ".csv")
       },
       content = function(file) {
-        write.csv(get_paired_data(), file, row.names = FALSE)
+        # Format date properly for the download
+        data <- get_paired_data()
+        data$SamplingDate <- format(data$SamplingDate, "%Y-%m-%d")
+        write.csv(data, file, row.names = FALSE)
       }
     )
     
@@ -282,4 +617,4 @@ inlet_outlet_app <- function(db_path = "water_samples.db") {
 }
 
 # Run the app
-inlet_outlet_app()
+water_chemistry_combined_app()

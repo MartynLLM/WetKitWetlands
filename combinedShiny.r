@@ -159,10 +159,10 @@ water_chemistry_combined_app <- function(db_path = "water_samples.db") {
     # Connect to database
     con <- dbConnect(SQLite(), db_path)
     
-    # Check if Waterbody table exists
-    tables <- dbListTables(con)
-    if (!("Waterbody" %in% tables)) {
-      stop("Waterbody table not found in the database. Please check your database structure.")
+    # Check if chem_to_display view exists
+    views <- dbGetQuery(con, "SELECT name FROM sqlite_master WHERE type='view'")$name
+    if (!("chem_to_display" %in% views)) {
+      stop("chem_to_display view not found in the database. Please check your database structure.")
     }
     
     # Button actions to switch between interfaces
@@ -190,17 +190,17 @@ water_chemistry_combined_app <- function(db_path = "water_samples.db") {
     
     # Get list of all parameters
     all_parameters <- reactive({
-      dbGetQuery(con, "SELECT DISTINCT parameter FROM normalized_chemistry ORDER BY parameter")$parameter
+      dbGetQuery(con, "SELECT DISTINCT parameter FROM chem_to_display ORDER BY parameter")$parameter
     })
     
     # Get list of all regions
     all_regions <- reactive({
-      dbGetQuery(con, "SELECT DISTINCT region FROM Waterbody ORDER BY region")$region
+      dbGetQuery(con, "SELECT DISTINCT region FROM chem_to_display ORDER BY region")$region
     })
     
-    # Get list of all waterbodies
+    # Get all waterbodies with their regions
     all_waterbodies <- reactive({
-      dbGetQuery(con, "SELECT waterbodyID, Waterbody, region FROM Waterbody ORDER BY region, Waterbody")
+      dbGetQuery(con, "SELECT DISTINCT waterbodyID, waterbody, region FROM chem_to_display ORDER BY region, waterbody")
     })
     
     # Filtered waterbodies based on selected regions (for parameter comparison)
@@ -209,7 +209,7 @@ water_chemistry_combined_app <- function(db_path = "water_samples.db") {
       wb_data <- all_waterbodies()
       
       # If regions are selected, filter waterbodies
-      if (length(input$region_param) > 0) {
+      if (length(input$region_param) > 0 && !("All" %in% input$region_param)) {
         wb_data <- wb_data %>% filter(region %in% input$region_param)
       }
       
@@ -222,7 +222,7 @@ water_chemistry_combined_app <- function(db_path = "water_samples.db") {
       wb_data <- all_waterbodies()
       
       # If regions are selected, filter waterbodies
-      if (length(input$region_io) > 0) {
+      if (length(input$region_io) > 0 && !("All" %in% input$region_io)) {
         wb_data <- wb_data %>% filter(region %in% input$region_io)
       }
       
@@ -251,7 +251,7 @@ water_chemistry_combined_app <- function(db_path = "water_samples.db") {
       
       waterbody_choices <- setNames(
         waterbodies$waterbodyID,
-        paste0(waterbodies$Waterbody, " (", waterbodies$region, ")")
+        paste0(waterbodies$waterbody, " (", waterbodies$region, ")")
       )
       
       updateSelectInput(session, "waterbody_param", 
@@ -269,47 +269,48 @@ water_chemistry_combined_app <- function(db_path = "water_samples.db") {
       region_filter <- ""
       if (length(input$region_param) > 0 && !("All" %in% input$region_param)) {
         regions <- paste0("'", paste(input$region_param, collapse = "','"), "'")
-        region_filter <- paste0(" AND wb.region IN (", regions, ")")
+        region_filter <- paste0(" AND x_data.region IN (", regions, ")")
       }
       
       # Build waterbody filter
       waterbody_filter <- ""
       if (length(input$waterbody_param) > 0 && !("All" %in% input$waterbody_param)) {
         waterbody_ids <- paste(input$waterbody_param, collapse = ",")
-        waterbody_filter <- paste0(" AND wb.waterbodyID IN (", waterbody_ids, ")")
+        waterbody_filter <- paste0(" AND x_data.waterbodyID IN (", waterbody_ids, ")")
       }
       
-      # SQL query to join the data for both parameters with Waterbody table
+      # SQL query using the chem_to_display view
       query <- paste0("
         SELECT 
           x_data.sampleID,
-          wb.waterbodyID,
-          wb.Waterbody,
-          wb.region,
-          x_data.inlet_outlet,
+          x_data.waterbodyID,
+          x_data.waterbody,
+          x_data.region,
+          x_data.SamplingDate,
           x_data.value as x_value,
           y_data.value as y_value
         FROM 
-          normalized_chemistry x_data
+          chem_to_display x_data
         JOIN 
-          normalized_chemistry y_data 
+          chem_to_display y_data 
         ON 
           x_data.sampleID = y_data.sampleID
-        JOIN
-          Waterbody wb
-        ON
-          x_data.waterbodyID = wb.waterbodyID
         WHERE 
           x_data.parameter = '", input$xParam, "'
           AND y_data.parameter = '", input$yParam, "'", 
           region_filter,
           waterbody_filter, "
         ORDER BY
-          wb.region, wb.Waterbody, x_data.sampleID
+          x_data.region, x_data.waterbody, x_data.SamplingDate
       ")
       
       # Execute query
       data <- dbGetQuery(con, query)
+      
+      # Convert SamplingDate to Date format if it's character
+      if (nrow(data) > 0 && is.character(data$SamplingDate)) {
+        data$SamplingDate <- as.Date(data$SamplingDate)
+      }
       
       # Return the data
       return(data)
@@ -328,7 +329,7 @@ water_chemistry_combined_app <- function(db_path = "water_samples.db") {
       }
       
       # Create the scatter plot
-      p <- ggplot(data, aes(x = x_value, y = y_value, color = Waterbody)) +
+      p <- ggplot(data, aes(x = x_value, y = y_value, color = waterbody)) +
         geom_point(size = 3, alpha = 0.7) +
         labs(
           title = paste("Relationship between", input$xParam, "and", input$yParam),
@@ -378,13 +379,18 @@ water_chemistry_combined_app <- function(db_path = "water_samples.db") {
           "Number of Samples", 
           "Number of Water Bodies",
           "Number of Regions",
+          "Date Range",
           "Pearson Correlation", 
           "p-value"
         ),
         Value = c(
           nrow(data),
-          length(unique(data$Waterbody)),
+          length(unique(data$waterbody)),
           length(unique(data$region)),
+          ifelse(nrow(data) > 0, 
+                 paste(format(min(data$SamplingDate), "%Y-%m-%d"), "to", 
+                       format(max(data$SamplingDate), "%Y-%m-%d")),
+                 "N/A"),
           round(correlation$estimate, 4),
           format.pval(correlation$p.value, digits = 3)
         )
@@ -401,11 +407,12 @@ water_chemistry_combined_app <- function(db_path = "water_samples.db") {
       
       # Format the data for display
       display_data <- data %>%
+        mutate(SamplingDate = format(SamplingDate, "%Y-%m-%d")) %>%
         select(
           SampleID = sampleID,
           Region = region,
-          `Water Body` = Waterbody,
-          `Inlet/Outlet` = inlet_outlet,
+          `Water Body` = waterbody,
+          `Sampling Date` = SamplingDate,
           !!sym(input$xParam) := x_value,
           !!sym(input$yParam) := y_value
         )
@@ -428,7 +435,9 @@ water_chemistry_combined_app <- function(db_path = "water_samples.db") {
         paste0(input$xParam, "_vs_", input$yParam, ".csv")
       },
       content = function(file) {
-        write.csv(get_parameter_data(), file, row.names = FALSE)
+        data <- get_parameter_data()
+        data$SamplingDate <- format(data$SamplingDate, "%Y-%m-%d")
+        write.csv(data, file, row.names = FALSE)
       }
     )
     
@@ -440,20 +449,47 @@ water_chemistry_combined_app <- function(db_path = "water_samples.db") {
       req(input$btn_inlet_outlet)
       
       # Get list of parameters that have both inlet and outlet values
-      inlet_outlet_parameters_query <- "
-        SELECT DISTINCT parameter 
-        FROM normalized_chemistry
-        WHERE parameter IN (
-          SELECT parameter
-          FROM normalized_chemistry
-          WHERE inlet_outlet = 'Inlet'
-          INTERSECT
-          SELECT parameter
-          FROM normalized_chemistry
-          WHERE inlet_outlet = 'Outlet'
-        )
-        ORDER BY parameter
-      "
+      # Note: Need to check if inlet_outlet column exists in the view
+      cols <- dbListFields(con, "chem_to_display")
+      
+      if ("inlet_outlet" %in% cols) {
+        # If inlet_outlet column exists in the view
+        inlet_outlet_parameters_query <- "
+          SELECT DISTINCT parameter 
+          FROM chem_to_display
+          WHERE parameter IN (
+            SELECT parameter
+            FROM chem_to_display
+            WHERE inlet_outlet = 'Inlet'
+            INTERSECT
+            SELECT parameter
+            FROM chem_to_display
+            WHERE inlet_outlet = 'Outlet'
+          )
+          ORDER BY parameter
+        "
+      } else {
+        # If inlet_outlet info is not in the view, we need a different approach
+        # We'll need to join with normalized_chemistry for inlet/outlet info
+        inlet_outlet_parameters_query <- "
+          SELECT DISTINCT cd.parameter 
+          FROM chem_to_display cd
+          JOIN normalized_chemistry nc ON cd.sampleID = nc.sampleID AND cd.parameter = nc.parameter
+          WHERE cd.parameter IN (
+            SELECT cd.parameter
+            FROM chem_to_display cd
+            JOIN normalized_chemistry nc ON cd.sampleID = nc.sampleID
+            WHERE nc.inlet_outlet = 'Inlet'
+            INTERSECT
+            SELECT cd.parameter
+            FROM chem_to_display cd
+            JOIN normalized_chemistry nc ON cd.sampleID = nc.sampleID
+            WHERE nc.inlet_outlet = 'Outlet'
+          )
+          ORDER BY cd.parameter
+        "
+      }
+      
       inlet_outlet_parameters <- dbGetQuery(con, inlet_outlet_parameters_query)$parameter
       
       regions <- all_regions()
@@ -469,7 +505,7 @@ water_chemistry_combined_app <- function(db_path = "water_samples.db") {
       
       waterbody_choices <- setNames(
         waterbodies$waterbodyID,
-        paste0(waterbodies$Waterbody, " (", waterbodies$region, ")")
+        paste0(waterbodies$waterbody, " (", waterbodies$region, ")")
       )
       
       updateSelectInput(session, "waterbody_io", 
@@ -486,71 +522,166 @@ water_chemistry_combined_app <- function(db_path = "water_samples.db") {
       region_filter <- ""
       if (length(input$region_io) > 0 && !("All" %in% input$region_io)) {
         regions <- paste0("'", paste(input$region_io, collapse = "','"), "'")
-        region_filter <- paste0(" AND wb.region IN (", regions, ")")
+        region_filter <- paste0(" AND inlet_data.region IN (", regions, ")")
       }
       
       # Build waterbody filter
       waterbody_filter <- ""
       if (length(input$waterbody_io) > 0 && !("All" %in% input$waterbody_io)) {
         waterbody_ids <- paste(input$waterbody_io, collapse = ",")
-        waterbody_filter <- paste0(" AND wb.waterbodyID IN (", waterbody_ids, ")")
+        waterbody_filter <- paste0(" AND inlet_data.waterbodyID IN (", waterbody_ids, ")")
       }
       
-      # SQL query to get paired inlet-outlet data by waterbodyID and date
-      query <- paste0("
-        SELECT 
-          wb.waterbodyID,
-          wb.Waterbody,
-          wb.region,
-          ws_inlet.SamplingDate,
-          inlet.sampleID as inlet_sampleID,
-          outlet.sampleID as outlet_sampleID,
-          inlet.value as inlet_value,
-          outlet.value as outlet_value
-        FROM 
-          normalized_chemistry inlet
-        JOIN
-          water_samples ws_inlet ON inlet.sampleID = ws_inlet.SampleID
-        JOIN 
-          normalized_chemistry outlet
-        JOIN
-          water_samples ws_outlet ON outlet.sampleID = ws_outlet.SampleID
-        JOIN
-          Waterbody wb ON ws_inlet.WaterbodyID = wb.waterbodyID
-        WHERE 
-          inlet.parameter = '", input$parameter_io, "' AND
-          outlet.parameter = '", input$parameter_io, "' AND
-          inlet.inlet_outlet = 'Inlet' AND
-          outlet.inlet_outlet = 'Outlet' AND
-          ws_inlet.WaterbodyID = ws_outlet.WaterbodyID AND
-          ws_outlet.WaterbodyID = wb.waterbodyID AND
-          ws_inlet.SamplingDate = ws_outlet.SamplingDate", 
-          region_filter,
-          waterbody_filter, "
-        ORDER BY
-          wb.region, wb.Waterbody, ws_inlet.SamplingDate
-      ")
+      # Check if inlet_outlet column exists in the view
+      cols <- dbListFields(con, "chem_to_display")
+      has_inlet_outlet <- "inlet_outlet" %in% cols
+      
+      if (has_inlet_outlet) {
+        # If inlet_outlet column exists in the view
+        query <- paste0("
+          WITH inlet_data AS (
+            SELECT 
+              cd.waterbodyID,
+              cd.waterbody,
+              cd.region,
+              cd.sampleID,
+              cd.SamplingDate,
+              cd.value as inlet_value
+            FROM 
+              chem_to_display cd
+            WHERE 
+              cd.parameter = '", input$parameter_io, "' AND
+              cd.inlet_outlet = 'Inlet'
+          ),
+          outlet_data AS (
+            SELECT 
+              cd.waterbodyID,
+              cd.sampleID,
+              cd.SamplingDate,
+              cd.value as outlet_value
+            FROM 
+              chem_to_display cd
+            WHERE 
+              cd.parameter = '", input$parameter_io, "' AND
+              cd.inlet_outlet = 'Outlet'
+          )
+          SELECT 
+            inlet_data.waterbodyID,
+            inlet_data.waterbody,
+            inlet_data.region,
+            inlet_data.SamplingDate,
+            inlet_data.sampleID as inlet_sampleID,
+            outlet_data.sampleID as outlet_sampleID,
+            inlet_data.inlet_value,
+            outlet_data.outlet_value
+          FROM 
+            inlet_data
+          JOIN 
+            outlet_data
+          ON 
+            inlet_data.waterbodyID = outlet_data.waterbodyID AND
+            inlet_data.SamplingDate = outlet_data.SamplingDate",
+            region_filter,
+            waterbody_filter, "
+          ORDER BY
+            inlet_data.region, inlet_data.waterbody, inlet_data.SamplingDate
+        ")
+      } else {
+        # If inlet_outlet info is not in the view, join with normalized_chemistry
+        query <- paste0("
+          WITH inlet_data AS (
+            SELECT 
+              cd.waterbodyID,
+              cd.waterbody,
+              cd.region,
+              cd.sampleID,
+              cd.SamplingDate,
+              cd.value as inlet_value
+            FROM 
+              chem_to_display cd
+            JOIN
+              normalized_chemistry nc
+            ON
+              cd.sampleID = nc.sampleID AND cd.parameter = nc.parameter
+            WHERE 
+              cd.parameter = '", input$parameter_io, "' AND
+              nc.inlet_outlet = 'Inlet'
+          ),
+          outlet_data AS (
+            SELECT 
+              cd.waterbodyID,
+              cd.sampleID,
+              cd.SamplingDate,
+              cd.value as outlet_value
+            FROM 
+              chem_to_display cd
+            JOIN
+              normalized_chemistry nc
+            ON
+              cd.sampleID = nc.sampleID AND cd.parameter = nc.parameter
+            WHERE 
+              cd.parameter = '", input$parameter_io, "' AND
+              nc.inlet_outlet = 'Outlet'
+          )
+          SELECT 
+            inlet_data.waterbodyID,
+            inlet_data.waterbody,
+            inlet_data.region,
+            inlet_data.SamplingDate,
+            inlet_data.sampleID as inlet_sampleID,
+            outlet_data.sampleID as outlet_sampleID,
+            inlet_data.inlet_value,
+            outlet_data.outlet_value
+          FROM 
+            inlet_data
+          JOIN 
+            outlet_data
+          ON 
+            inlet_data.waterbodyID = outlet_data.waterbodyID AND
+            inlet_data.SamplingDate = outlet_data.SamplingDate",
+            region_filter,
+            waterbody_filter, "
+          ORDER BY
+            inlet_data.region, inlet_data.waterbody, inlet_data.SamplingDate
+        ")
+      }
       
       # Execute query
-      data <- dbGetQuery(con, query)
-      
-      # Add difference and percent change columns
-      if (nrow(data) > 0) {
-        data$difference <- data$outlet_value - data$inlet_value
-        data$percent_change <- ifelse(
-          data$inlet_value != 0,
-          (data$outlet_value - data$inlet_value) / data$inlet_value * 100,
-          NA
-        )
+      tryCatch({
+        data <- dbGetQuery(con, query)
         
-        # Format the sampling date for display
-        if (is.character(data$SamplingDate)) {
-          # Try to convert to Date if it's a character
+        # Convert SamplingDate to Date format if it's character
+        if (nrow(data) > 0 && is.character(data$SamplingDate)) {
           data$SamplingDate <- as.Date(data$SamplingDate)
         }
-      }
-      
-      return(data)
+        
+        # Add difference and percent change columns
+        if (nrow(data) > 0) {
+          data$difference <- data$outlet_value - data$inlet_value
+          data$percent_change <- ifelse(
+            data$inlet_value != 0,
+            (data$outlet_value - data$inlet_value) / data$inlet_value * 100,
+            NA
+          )
+        }
+        
+        return(data)
+      }, error = function(e) {
+        message("Error in SQL query: ", e$message)
+        # Return empty dataframe with expected columns
+        return(data.frame(
+          waterbodyID = integer(),
+          waterbody = character(),
+          region = character(),
+          SamplingDate = as.Date(character()),
+          inlet_sampleID = integer(),
+          outlet_sampleID = integer(),
+          inlet_value = numeric(),
+          outlet_value = numeric(),
+          difference = numeric(),
+          percent_change = numeric()
+        ))
+      })
     })
     
     # Render the inlet-outlet plot
@@ -567,7 +698,7 @@ water_chemistry_combined_app <- function(db_path = "water_samples.db") {
       }
       
       # Create the base plot
-      p <- ggplot(data, aes(x = inlet_value, y = outlet_value, color = Waterbody)) +
+      p <- ggplot(data, aes(x = inlet_value, y = outlet_value, color = waterbody)) +
         geom_point(size = 3, alpha = 0.7) +
         labs(
           title = paste("Inlet vs. Outlet:", input$parameter_io),
@@ -623,7 +754,7 @@ water_chemistry_combined_app <- function(db_path = "water_samples.db") {
       
       # Calculate summary statistics
       cat("Number of paired samples:", nrow(data), "\n")
-      cat("Number of water bodies:", length(unique(data$Waterbody)), "\n")
+      cat("Number of water bodies:", length(unique(data$waterbody)), "\n")
       cat("Number of regions:", length(unique(data$region)), "\n")
       cat("Date range:", format(min(data$SamplingDate), "%Y-%m-%d"), "to", 
           format(max(data$SamplingDate), "%Y-%m-%d"), "\n\n")
@@ -694,7 +825,7 @@ water_chemistry_combined_app <- function(db_path = "water_samples.db") {
         mutate(SamplingDate = format(SamplingDate, "%Y-%m-%d")) %>%
         select(
           Region = region,
-          `Water Body` = Waterbody,
+          `Water Body` = waterbody,
           SamplingDate,
           `Inlet SampleID` = inlet_sampleID,
           `Outlet SampleID` = outlet_sampleID,

@@ -28,15 +28,16 @@ ui <- fluidPage(
 # Server logic
 server <- function(input, output, session) {
   
-  # Connect to SQLite database
-  db_conn <- reactive({
-    dbConnect(RSQLite::SQLite(), "water_samples.db")
+  # Create a single database connection when the session starts
+  conn <- dbConnect(RSQLite::SQLite(), "water_samples.db")
+  
+  # Close the connection when the session ends
+  onStop(function() {
+    dbDisconnect(conn)
   })
   
   # Fetch available parameters and regions for dropdowns
   observe({
-    conn <- db_conn()
-    
     # Get unique parameters
     parameters <- dbGetQuery(conn, "SELECT DISTINCT PARAMETER FROM inlet_outlet ORDER BY PARAMETER")
     updateSelectInput(session, "parameter", choices = parameters$PARAMETER)
@@ -44,15 +45,11 @@ server <- function(input, output, session) {
     # Get unique regions
     regions <- dbGetQuery(conn, "SELECT DISTINCT REGION FROM inlet_outlet ORDER BY REGION")
     updateSelectInput(session, "region", choices = regions$REGION, selected = regions$REGION[1])
-    
-    dbDisconnect(conn)
   })
   
   # Fetch filtered data based on user selections
   getData <- reactive({
     req(input$parameter)
-    
-    conn <- db_conn()
     
     # Build query with filters
     query <- "SELECT * FROM inlet_outlet WHERE PARAMETER = ?"
@@ -67,8 +64,6 @@ server <- function(input, output, session) {
     
     # Execute query
     data <- dbGetQuery(conn, query, params)
-    
-    dbDisconnect(conn)
     
     # Convert values to numeric
     data$INLET_VALUE <- as.numeric(data$INLET_VALUE)
@@ -125,13 +120,6 @@ server <- function(input, output, session) {
         `Percent Change` = round(mean((OUTLET_VALUE - INLET_VALUE) / INLET_VALUE * 100, na.rm = TRUE), 1)
       ) %>%
       arrange(desc(`Avg Change`))
-  })
-  
-  # Disconnect from database when the session ends
-  onSessionEnded(function() {
-    if (dbIsValid(db_conn())) {
-      dbDisconnect(db_conn())
-    }
   })
 }
 
